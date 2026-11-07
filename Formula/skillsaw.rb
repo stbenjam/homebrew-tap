@@ -7,6 +7,12 @@ class Skillsaw < Formula
   sha256 "2aba429ff644d4f67144fb017f5eac38e78b679cde7b1be4a20cadf0bd40ce26"
   license "Apache-2.0"
 
+  bottle do
+    root_url "https://github.com/stbenjam/homebrew-tap/releases/download/skillsaw-0.23.0"
+    sha256 cellar: :any, arm64_sequoia: "7946eace91b53fef307e91f5bc5fb2d35c8245bdb81282495fdd4e234da1a2f7"
+    sha256 cellar: :any, x86_64_linux:  "99bf96756fb9c0715525576c50160bc326fdbd524e1441e0c1b975edbed21b1c"
+  end
+
   depends_on "rust" => :build
   depends_on "libyaml"
   depends_on "python@3.14"
