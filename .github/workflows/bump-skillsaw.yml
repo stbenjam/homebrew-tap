@@ -1,0 +1,146 @@
+name: Bump skillsaw
+
+# Polls PyPI and moves Formula/skillsaw.rb to the newest release. The bump
+# lands on a staging branch, each platform builds and tests a bottle from it,
+# and publish uploads the bottles to a GitHub release, commits the bottle
+# block, and fast-forwards main.
+#
+# This runs as one workflow rather than the brew tap-new PR flow because PRs
+# and labels created with GITHUB_TOKEN do not trigger other workflows.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-skillsaw
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true # zizmor: ignore[artipacked] pushes the staging branch
+
+      - name: Check for a new release
+        id: release
+        run: |
+          current=$(sed -nE 's|^  url ".*/skillsaw-([0-9][^"]*)\.tar\.gz"$|\1|p' Formula/skillsaw.rb)
+          latest=$(curl -fsSL https://pypi.org/pypi/skillsaw/json | jq -r .info.version)
+          echo "current=$current latest=$latest"
+          # A formula without bottles (first run, or a failed publish) rebuilds.
+          if [ "$current" = "$latest" ] && grep -q '^  bottle do$' Formula/skillsaw.rb; then
+            exit 0
+          fi
+          curl -fsSL "https://pypi.org/pypi/skillsaw/$latest/json" |
+            jq -r '.urls[] | select(.packagetype == "sdist") | "url=\(.url)\nsha256=\(.digests.sha256)"' \
+            >> "$GITHUB_OUTPUT"
+          echo "version=$latest" >> "$GITHUB_OUTPUT"
+
+      - name: Set up the tap
+        if: steps.release.outputs.version
+        run: .github/scripts/setup-tap.sh
+
+      - name: Update the formula
+        if: steps.release.outputs.version
+        env:
+          URL: ${{ steps.release.outputs.url }}
+          SHA256: ${{ steps.release.outputs.sha256 }}
+        run: |
+          # Two-space indent matches only the top-level url/sha256, not resources.
+          sed -i -E "s|^  url \".*\"$|  url \"$URL\"|; s|^  sha256 \".*\"$|  sha256 \"$SHA256\"|" Formula/skillsaw.rb
+          # The old version's bottles no longer match; publish writes new ones.
+          sed -i '/^  bottle do$/,/^  end$/d' Formula/skillsaw.rb
+          # Homebrew skips PyPI uploads younger than a day; exempt skillsaw itself
+          # so release day works. Its dependencies still honor the cooldown.
+          brew update-python-resources --ignore-main-package-cooldown stbenjam/tap/skillsaw
+          brew style --fix stbenjam/tap/skillsaw
+          git diff
+
+      - name: Push the staging branch
+        if: steps.release.outputs.version
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "skillsaw $VERSION"
+          git push --force origin "HEAD:refs/heads/bump/skillsaw-$VERSION"
+
+  bottle:
+    needs: bump
+    if: needs.bump.outputs.version
+    strategy:
+      matrix:
+        os: [macos-15, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: bump/skillsaw-${{ needs.bump.outputs.version }}
+          persist-credentials: false
+
+      - name: Set up the tap
+        run: .github/scripts/setup-tap.sh
+
+      - name: Build, test and audit
+        env:
+          VERSION: ${{ needs.bump.outputs.version }}
+        run: |
+          brew install --build-bottle stbenjam/tap/skillsaw
+          brew test stbenjam/tap/skillsaw
+          brew audit --strict --online stbenjam/tap/skillsaw
+          mkdir -p "$RUNNER_TEMP/bottles"
+          cd "$RUNNER_TEMP/bottles"
+          brew bottle --json \
+            --root-url="https://github.com/stbenjam/homebrew-tap/releases/download/skillsaw-$VERSION" \
+            stbenjam/tap/skillsaw
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bottles-${{ matrix.os }}
+          path: ${{ runner.temp }}/bottles/
+          if-no-files-found: error
+
+  publish:
+    needs: [bump, bottle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: bump/skillsaw-${{ needs.bump.outputs.version }}
+          persist-credentials: true # zizmor: ignore[artipacked] pushes the bottle commit to main
+
+      - name: Set up the tap
+        run: .github/scripts/setup-tap.sh
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: bottles-*
+          path: ${{ runner.temp }}/bottles/
+          merge-multiple: true
+
+      - name: Upload bottles and commit the bottle block
+        env:
+          HOMEBREW_GITHUB_API_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.bump.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cd "$RUNNER_TEMP/bottles"
+          brew pr-upload \
+            --root-url="https://github.com/stbenjam/homebrew-tap/releases/download/skillsaw-$VERSION"
+          cd "$GITHUB_WORKSPACE"
+          git push origin HEAD:main
+          git push origin --delete "bump/skillsaw-$VERSION"
