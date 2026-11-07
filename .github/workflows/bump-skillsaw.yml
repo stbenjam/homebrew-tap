@@ -73,7 +73,8 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -am "skillsaw $VERSION"
+          # Rebottling the current version may leave the formula unchanged.
+          git diff --quiet || git commit -am "skillsaw $VERSION"
           git push --force origin "HEAD:refs/heads/bump/skillsaw-$VERSION"
 
   bottle:
